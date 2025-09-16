@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
 import logging
 from typing import Any
 
-from zigpy.const import APS_REPLY_TIMEOUT
 import zigpy.exceptions
 import zigpy.profiles
 import zigpy.types as t
-from zigpy.typing import DeviceType
+from zigpy.typing import AddressingMode, DeviceType
 import zigpy.util
 import zigpy.zcl
-from zigpy.zcl.foundation import GENERAL_COMMANDS, GeneralCommand, Status as ZCLStatus
+from zigpy.zcl.foundation import (
+    GENERAL_COMMANDS,
+    CommandSchema,
+    GeneralCommand,
+    Status as ZCLStatus,
+    ZCLHeader,
+)
 from zigpy.zdo.types import Status as ZDOStatus
 
 LOGGER = logging.getLogger(__name__)
@@ -50,7 +56,7 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
         self._model: str | None = None
 
     async def initialize(self) -> None:
-        self.info("Discovering endpoint information")
+        # self.info("Discovering endpoint information")
 
         if self.profile_id is not None or self.status == Status.ENDPOINT_INACTIVE:
             self.info("Endpoint descriptor already queried")
@@ -68,7 +74,11 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
                     "Failed to retrieve service descriptor: %s", status
                 )
 
-            self.info("Discovered endpoint information: %s", sd)
+            with open("../library/simple_descriptor/{}_{}.json".format(self._device.ieee, self._endpoint_id), "w") as f:
+                json.dump(sd.as_dict(), f, indent=4)
+
+            self.info("[INITIALIZE] Endpoint: {}".format(sd))
+
             self.profile_id = sd.profile
             self.device_type = sd.device_type
 
@@ -85,11 +95,6 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
 
         self.status = Status.ZDO_INIT
 
-    @property
-    def clusters(self) -> list[zigpy.zcl.Cluster]:
-        """Return all clusters on this endpoint."""
-        return [*self.in_clusters.values(), *self.out_clusters.values()]
-
     def add_input_cluster(
         self, cluster_id: int, cluster: zigpy.zcl.Cluster | None = None
     ) -> zigpy.zcl.Cluster:
@@ -101,6 +106,7 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
             if cluster_id in self.in_clusters:
                 return self.in_clusters[cluster_id]
 
+            # endpoint, cluster_id 构造 zigpy.zcl.Cluster
             cluster = zigpy.zcl.Cluster.from_id(self, cluster_id, is_server=True)
 
         self.in_clusters[cluster_id] = cluster
@@ -130,13 +136,6 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
             cluster = zigpy.zcl.Cluster.from_id(self, cluster_id, is_server=False)
 
         self.out_clusters[cluster_id] = cluster
-
-        if self._device.application._dblistener is not None:
-            listener = zigpy.zcl.ClusterPersistingListener(
-                self._device.application._dblistener, cluster
-            )
-            cluster.add_listener(listener)
-
         return cluster
 
     async def add_to_group(self, grp_id: int, name: str | None = None) -> ZCLStatus:
@@ -211,17 +210,43 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
 
         return self._model, self._manufacturer
 
+    def deserialize(
+        self, cluster_id: t.ClusterId, data: bytes
+    ) -> tuple[ZCLHeader, CommandSchema]:
+        """Deserialize data for ZCL"""
+        if cluster_id not in self.in_clusters and cluster_id not in self.out_clusters:
+            raise KeyError(f"No cluster ID 0x{cluster_id:04x} on {self.unique_id}")
+
+        cluster = self.in_clusters.get(cluster_id, self.out_clusters.get(cluster_id))
+        return cluster.deserialize(data)
+
+    def handle_message(
+        self,
+        profile: int,
+        cluster: int,
+        hdr: ZCLHeader,
+        args: list,
+        *,
+        dst_addressing: AddressingMode | None = None,
+    ) -> None:
+        if cluster in self.in_clusters:
+            handler = self.in_clusters[cluster].handle_message
+        elif cluster in self.out_clusters:
+            handler = self.out_clusters[cluster].handle_message
+        else:
+            self.debug("Message on unknown cluster 0x%04x", cluster)
+            self.listener_event("unknown_cluster_message", hdr.command_id, args)
+            return
+
+        handler(hdr, args, dst_addressing=dst_addressing)
+
     async def request(
         self,
         cluster: t.ClusterId,
         sequence: t.uint8_t,
         data: bytes,
-        command_id: GeneralCommand | t.uint8_t = 0x00,
-        timeout=APS_REPLY_TIMEOUT,
         expect_reply: bool = True,
-        use_ieee: bool = False,
-        ask_for_ack: bool | None = None,
-        priority: int | None = None,
+        command_id: GeneralCommand | t.uint8_t = 0x00,
     ):
         if self.profile_id == zigpy.profiles.zll.PROFILE_ID and not (
             cluster == zigpy.zcl.clusters.lightlink.LightLink.cluster_id
@@ -232,17 +257,13 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
             profile_id = self.profile_id
 
         return await self.device.request(
-            profile=profile_id,
-            cluster=cluster,
-            src_ep=self._endpoint_id,
-            dst_ep=self._endpoint_id,
-            sequence=sequence,
-            data=data,
-            timeout=timeout,
+            profile_id,
+            cluster,
+            self._endpoint_id,
+            self._endpoint_id,
+            sequence,
+            data,
             expect_reply=expect_reply,
-            use_ieee=use_ieee,
-            ask_for_ack=ask_for_ack,
-            priority=priority,
         )
 
     async def reply(
@@ -251,11 +272,6 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
         sequence: t.uint8_t,
         data: bytes,
         command_id: GeneralCommand | t.uint8_t = 0x00,
-        timeout=APS_REPLY_TIMEOUT,
-        expect_reply: bool = False,
-        use_ieee: bool = False,
-        ask_for_ack: bool | None = None,
-        priority: int | None = None,
     ) -> None:
         if self.profile_id == zigpy.profiles.zll.PROFILE_ID and not (
             cluster == zigpy.zcl.clusters.lightlink.LightLink.cluster_id
@@ -266,22 +282,12 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
             profile_id = self.profile_id
 
         return await self.device.reply(
-            profile=profile_id,
-            cluster=cluster,
-            src_ep=self._endpoint_id,
-            dst_ep=self._endpoint_id,
-            sequence=sequence,
-            data=data,
-            timeout=timeout,
-            expect_reply=expect_reply,
-            use_ieee=use_ieee,
-            ask_for_ack=ask_for_ack,
-            priority=priority,
+            profile_id, cluster, self._endpoint_id, self._endpoint_id, sequence, data
         )
 
     def log(self, lvl: int, msg: str, *args: Any, **kwargs: Any) -> None:
         msg = "[0x%04x:%s] " + msg
-        args = (self._device.nwk, self._endpoint_id, *args)
+        args = (self._device.nwk, self._endpoint_id) + args
         LOGGER.log(lvl, msg, *args, **kwargs)
 
     @property
@@ -333,11 +339,28 @@ class Endpoint(zigpy.util.LocalLogMixin, zigpy.util.ListenableMixin):
     def unique_id(self) -> tuple[t.EUI64, int]:
         return self.device.ieee, self.endpoint_id
 
+    def get_cluster(self, name: str) -> zigpy.zcl.Cluster:
+        try:
+            if not self._cluster_attr:
+                return None
+            return self._cluster_attr[name]
+        except KeyError:
+            # self.warning("Don't have incluster: {}".format(name))
+            raise AttributeError
+
+    def get_cluster_from_id(self, cid: int) ->zigpy.zcl.Cluster:
+        if cid in self.in_clusters.keys():
+            return self.in_clusters[cid]
+        elif cid in self.out_clusters.keys():
+            return self.out_clusters[cid]
+        else:
+            return None
+
     def __getattr__(self, name: str) -> zigpy.zcl.Cluster:
         try:
             return self._cluster_attr[name]
-        except KeyError as exc:
-            raise AttributeError from exc
+        except KeyError:
+            raise AttributeError
 
     def __repr__(self) -> str:
         def cluster_repr(clusters):
