@@ -4,14 +4,9 @@ import dataclasses
 import enum
 import functools
 import keyword
-import logging
 import typing
 
-from typing_extensions import Self
-
 import zigpy.types as t
-
-_LOGGER = logging.getLogger(__name__)
 
 
 def _hex_uint16_repr(v: int) -> str:
@@ -72,18 +67,16 @@ class Status(t.enum8):
         return status
 
 
-class DataClass(enum.Enum):
-    Null = 0
-    Analog = 1
-    Discrete = 2
-    Composite = 3
+class Analog:
+    pass
 
 
-# TODO: Backwards compatibility, remove later
-Null = DataClass.Null
-Analog = DataClass.Analog
-Discrete = DataClass.Discrete
-Composite = DataClass.Composite
+class Discrete:
+    pass
+
+
+class Null:
+    pass
 
 
 class Unknown(t.NoData):
@@ -99,7 +92,7 @@ class TypeValue:
         # "Copy constructor"
         if type is not None and value is None and isinstance(type, self.__class__):
             other = type
-            type = other.type  # noqa: A001
+            type = other.type
             value = other.value
 
         self.type = type
@@ -110,11 +103,11 @@ class TypeValue:
 
     @classmethod
     def deserialize(cls, data: bytes) -> tuple[TypeValue, bytes]:
-        data_type, data = t.uint8_t.deserialize(data)
-        python_type = DataType.from_type_id(data_type).python_type
+        type, data = t.uint8_t.deserialize(data)
+        python_type = DATA_TYPES[type][1]
         value, data = python_type.deserialize(data)
 
-        return cls(type=data_type, value=value), data
+        return cls(type=type, value=value), data
 
     def __repr__(self) -> str:
         return (
@@ -127,11 +120,11 @@ class TypeValue:
 class TypedCollection(TypeValue):
     @classmethod
     def deserialize(cls, data):
-        data_type, data = t.uint8_t.deserialize(data)
-        python_type = DataType.from_type_id(data_type).python_type
+        type, data = t.uint8_t.deserialize(data)
+        python_type = DATA_TYPES[type][1]
         values, data = t.LVList[python_type, t.uint16_t].deserialize(data)
 
-        return cls(type=data_type, value=values), data
+        return cls(type=type, value=values), data
 
 
 class Array(TypedCollection):
@@ -146,559 +139,111 @@ class Set(TypedCollection):
     pass  # ToDo: Make this a real set?
 
 
+class DataTypes(dict):
+    """DataTypes container."""
+
+    def __init__(
+        self,
+        data_types: dict[
+            int,
+            tuple[
+                str,
+                typing.Any,
+                typing.Literal[Null]
+                | typing.Literal[Discrete]
+                | typing.Literal[Analog]
+                | typing.Literal[None],
+            ],
+        ],
+    ) -> None:
+        super().__init__(data_types)
+        self._idx_by_class = {
+            _type: type_id for type_id, (name, _type, ad) in self.items()
+        }
+
+    def pytype_to_datatype_id(self, python_type: typing.Any) -> int:
+        """Return Zigbee Datatype ID for a give python type."""
+
+        # We return the most specific parent class
+        for cls in python_type.__mro__:
+            if cls in self._idx_by_class:
+                return self._idx_by_class[cls]
+
+        return 0xFF
+
+
 class ZCLStructure(t.LVList, item_type=TypeValue, length_type=t.uint16_t):
     """ZCL Structure data type."""
 
 
-class DataTypeId(t.enum8):
-    unk = 0xFF
-    nodata = 0x00
-    data8 = 0x08
-    data16 = 0x09
-    data24 = 0x0A
-    data32 = 0x0B
-    data40 = 0x0C
-    data48 = 0x0D
-    data56 = 0x0E
-    data64 = 0x0F
-    bool_ = 0x10
-    map8 = 0x18
-    map16 = 0x19
-    map24 = 0x1A
-    map32 = 0x1B
-    map40 = 0x1C
-    map48 = 0x1D
-    map56 = 0x1E
-    map64 = 0x1F
-    uint8 = 0x20
-    uint16 = 0x21
-    uint24 = 0x22
-    uint32 = 0x23
-    uint40 = 0x24
-    uint48 = 0x25
-    uint56 = 0x26
-    uint64 = 0x27
-    int8 = 0x28
-    int16 = 0x29
-    int24 = 0x2A
-    int32 = 0x2B
-    int40 = 0x2C
-    int48 = 0x2D
-    int56 = 0x2E
-    int64 = 0x2F
-    enum8 = 0x30
-    enum16 = 0x31
-    semi = 0x38
-    single = 0x39
-    double = 0x3A
-    octstr = 0x41
-    string = 0x42
-    octstr16 = 0x43
-    string16 = 0x44
-    array = 0x48
-    struct = 0x4C
-    set = 0x50
-    bag = 0x51
-    ToD = 0xE0
-    date = 0xE1
-    UTC = 0xE2
-    clusterId = 0xE8  # noqa: N815
-    attribId = 0xE9  # noqa: N815
-    bacOID = 0xEA  # noqa: N815
-    EUI64 = 0xF0
-    key128 = 0xF1
+DATA_TYPES = DataTypes(
+    {
+        0x00: ("No data", t.NoData, Null),
+        0x08: ("General", t.data8, Discrete),
+        0x09: ("General", t.data16, Discrete),
+        0x0A: ("General", t.data24, Discrete),
+        0x0B: ("General", t.data32, Discrete),
+        0x0C: ("General", t.data40, Discrete),
+        0x0D: ("General", t.data48, Discrete),
+        0x0E: ("General", t.data56, Discrete),
+        0x0F: ("General", t.data64, Discrete),
+        0x10: ("Boolean", t.Bool, Discrete),
+        0x18: ("Bitmap", t.bitmap8, Discrete),
+        0x19: ("Bitmap", t.bitmap16, Discrete),
+        0x1A: ("Bitmap", t.bitmap24, Discrete),
+        0x1B: ("Bitmap", t.bitmap32, Discrete),
+        0x1C: ("Bitmap", t.bitmap40, Discrete),
+        0x1D: ("Bitmap", t.bitmap48, Discrete),
+        0x1E: ("Bitmap", t.bitmap56, Discrete),
+        0x1F: ("Bitmap", t.bitmap64, Discrete),
+        0x20: ("Unsigned Integer", t.uint8_t, Analog),
+        0x21: ("Unsigned Integer", t.uint16_t, Analog),
+        0x22: ("Unsigned Integer", t.uint24_t, Analog),
+        0x23: ("Unsigned Integer", t.uint32_t, Analog),
+        0x24: ("Unsigned Integer", t.uint40_t, Analog),
+        0x25: ("Unsigned Integer", t.uint48_t, Analog),
+        0x26: ("Unsigned Integer", t.uint56_t, Analog),
+        0x27: ("Unsigned Integer", t.uint64_t, Analog),
+        0x28: ("Signed Integer", t.int8s, Analog),
+        0x29: ("Signed Integer", t.int16s, Analog),
+        0x2A: ("Signed Integer", t.int24s, Analog),
+        0x2B: ("Signed Integer", t.int32s, Analog),
+        0x2C: ("Signed Integer", t.int40s, Analog),
+        0x2D: ("Signed Integer", t.int48s, Analog),
+        0x2E: ("Signed Integer", t.int56s, Analog),
+        0x2F: ("Signed Integer", t.int64s, Analog),
+        0x30: ("Enumeration", t.enum8, Discrete),
+        0x31: ("Enumeration", t.enum16, Discrete),
+        0x38: ("Floating point", t.Half, Analog),
+        0x39: ("Floating point", t.Single, Analog),
+        0x3A: ("Floating point", t.Double, Analog),
+        0x41: ("Octet string", t.LVBytes, Discrete),
+        0x42: ("Character string", t.CharacterString, Discrete),
+        0x43: ("Long octet string", t.LongOctetString, Discrete),
+        0x44: ("Long character string", t.LongCharacterString, Discrete),
+        0x48: ("Array", Array, Discrete),
+        0x4C: ("Structure", ZCLStructure, Discrete),
+        0x50: ("Set", Set, Discrete),
+        0x51: ("Bag", Bag, Discrete),
+        0xE0: ("Time of day", t.TimeOfDay, Analog),
+        0xE1: ("Date", t.Date, Analog),
+        0xE2: ("UTCTime", t.UTCTime, Analog),
+        0xE8: ("Cluster ID", t.ClusterId, Discrete),
+        0xE9: ("Attribute ID", t.AttributeId, Discrete),
+        0xEA: ("BACNet OID", t.BACNetOid, Discrete),
+        0xF0: ("IEEE address", t.EUI64, Discrete),
+        0xF1: ("128-bit security key", t.KeyData, Discrete),
+        0xFF: ("Unknown", Unknown, None),
+    }
+)
 
 
-@dataclasses.dataclass(frozen=True)
-class DataTypeInfo:
-    type_id: DataTypeId
-    python_type: type
-    type_class: DataClass
-    description: str
-    non_value: typing.Any | None
-
-
-class DataType(DataTypeInfo, enum.Enum):
-    unk = (
-        DataTypeId.unk,
-        Unknown,
-        DataClass.Null,
-        "Unknown",
-        None,
-    )
-    nodata = (
-        DataTypeId.nodata,
-        t.NoData,
-        DataClass.Null,
-        "No data",
-        None,
-    )
-    data8 = (
-        DataTypeId.data8,
-        t.data8,
-        DataClass.Discrete,
-        "General",
-        None,
-    )
-    data16 = (
-        DataTypeId.data16,
-        t.data16,
-        DataClass.Discrete,
-        "General",
-        None,
-    )
-    data24 = (
-        DataTypeId.data24,
-        t.data24,
-        DataClass.Discrete,
-        "General",
-        None,
-    )
-    data32 = (
-        DataTypeId.data32,
-        t.data32,
-        DataClass.Discrete,
-        "General",
-        None,
-    )
-    data40 = (
-        DataTypeId.data40,
-        t.data40,
-        DataClass.Discrete,
-        "General",
-        None,
-    )
-    data48 = (
-        DataTypeId.data48,
-        t.data48,
-        DataClass.Discrete,
-        "General",
-        None,
-    )
-    data56 = (
-        DataTypeId.data56,
-        t.data56,
-        DataClass.Discrete,
-        "General",
-        None,
-    )
-    data64 = (
-        DataTypeId.data64,
-        t.data64,
-        DataClass.Discrete,
-        "General",
-        None,
-    )
-    bool_ = (
-        DataTypeId.bool_,
-        t.Bool,
-        DataClass.Discrete,
-        "Boolean",
-        t.Bool(0xFF),
-    )
-    map8 = (
-        DataTypeId.map8,
-        t.bitmap8,
-        DataClass.Discrete,
-        "Bitmap",
-        None,
-    )
-    map16 = (
-        DataTypeId.map16,
-        t.bitmap16,
-        DataClass.Discrete,
-        "Bitmap",
-        None,
-    )
-    map24 = (
-        DataTypeId.map24,
-        t.bitmap24,
-        DataClass.Discrete,
-        "Bitmap",
-        None,
-    )
-    map32 = (
-        DataTypeId.map32,
-        t.bitmap32,
-        DataClass.Discrete,
-        "Bitmap",
-        None,
-    )
-    map40 = (
-        DataTypeId.map40,
-        t.bitmap40,
-        DataClass.Discrete,
-        "Bitmap",
-        None,
-    )
-    map48 = (
-        DataTypeId.map48,
-        t.bitmap48,
-        DataClass.Discrete,
-        "Bitmap",
-        None,
-    )
-    map56 = (
-        DataTypeId.map56,
-        t.bitmap56,
-        DataClass.Discrete,
-        "Bitmap",
-        None,
-    )
-    map64 = (
-        DataTypeId.map64,
-        t.bitmap64,
-        DataClass.Discrete,
-        "Bitmap",
-        None,
-    )
-    uint8 = (
-        DataTypeId.uint8,
-        t.uint8_t,
-        DataClass.Analog,
-        "Unsigned 8-bit integer",
-        t.uint8_t(0xFF),
-    )
-    uint16 = (
-        DataTypeId.uint16,
-        t.uint16_t,
-        DataClass.Analog,
-        "Unsigned 16-bit integer",
-        t.uint16_t(0xFFFF),
-    )
-    uint24 = (
-        DataTypeId.uint24,
-        t.uint24_t,
-        DataClass.Analog,
-        "Unsigned 24-bit integer",
-        t.uint24_t(0xFFFFFF),
-    )
-    uint32 = (
-        DataTypeId.uint32,
-        t.uint32_t,
-        DataClass.Analog,
-        "Unsigned 32-bit integer",
-        t.uint32_t(0xFFFFFFFF),
-    )
-    uint40 = (
-        DataTypeId.uint40,
-        t.uint40_t,
-        DataClass.Analog,
-        "Unsigned 40-bit integer",
-        t.uint40_t(0xFFFFFFFFFF),
-    )
-    uint48 = (
-        DataTypeId.uint48,
-        t.uint48_t,
-        DataClass.Analog,
-        "Unsigned 48-bit integer",
-        t.uint48_t(0xFFFFFFFFFFFF),
-    )
-    uint56 = (
-        DataTypeId.uint56,
-        t.uint56_t,
-        DataClass.Analog,
-        "Unsigned 56-bit integer",
-        t.uint56_t(0xFFFFFFFFFFFFFF),
-    )
-    uint64 = (
-        DataTypeId.uint64,
-        t.uint64_t,
-        DataClass.Analog,
-        "Unsigned 64-bit integer",
-        t.uint64_t(0xFFFFFFFFFFFFFF),
-    )
-    int8 = (
-        DataTypeId.int8,
-        t.int8s,
-        DataClass.Analog,
-        "Signed 8-bit integer",
-        t.int8s(-0x80),
-    )
-    int16 = (
-        DataTypeId.int16,
-        t.int16s,
-        DataClass.Analog,
-        "Signed 16-bit integer",
-        t.int16s(-0x8000),
-    )
-    int24 = (
-        DataTypeId.int24,
-        t.int24s,
-        DataClass.Analog,
-        "Signed 24-bit integer",
-        t.int24s(-0x800000),
-    )
-    int32 = (
-        DataTypeId.int32,
-        t.int32s,
-        DataClass.Analog,
-        "Signed 32-bit integer",
-        t.int32s(-0x80000000),
-    )
-    int40 = (
-        DataTypeId.int40,
-        t.int40s,
-        DataClass.Analog,
-        "Signed 40-bit integer",
-        t.int40s(-0x8000000000),
-    )
-    int48 = (
-        DataTypeId.int48,
-        t.int48s,
-        DataClass.Analog,
-        "Signed 48-bit integer",
-        t.int48s(-0x800000000000),
-    )
-    int56 = (
-        DataTypeId.int56,
-        t.int56s,
-        DataClass.Analog,
-        "Signed 56-bit integer",
-        t.int56s(-0x80000000000000),
-    )
-    int64 = (
-        DataTypeId.int64,
-        t.int64s,
-        DataClass.Analog,
-        "Signed 64-bit integer",
-        t.int64s(-0x80000000000000),
-    )
-    enum8 = (
-        DataTypeId.enum8,
-        t.enum8,
-        DataClass.Discrete,
-        "8-bit enumeration",
-        t.enum8(0xFF),
-    )
-    enum16 = (
-        DataTypeId.enum16,
-        t.enum16,
-        DataClass.Discrete,
-        "16-bit enumeration",
-        t.enum16(0xFF),
-    )
-    semi = (
-        DataTypeId.semi,
-        t.Half,
-        DataClass.Analog,
-        "Semi-precision",
-        t.Half(float("nan")),
-    )
-    single = (
-        DataTypeId.single,
-        t.Single,
-        DataClass.Analog,
-        "Single precision",
-        t.Single(float("nan")),
-    )
-    double = (
-        DataTypeId.double,
-        t.Double,
-        DataClass.Analog,
-        "Double precision",
-        t.Double(float("nan")),
-    )
-    octstr = (
-        DataTypeId.octstr,
-        t.LVBytes,
-        DataClass.Discrete,
-        "Octet string",
-        None,
-    )
-    string = (
-        DataTypeId.string,
-        t.CharacterString,
-        DataClass.Discrete,
-        "Character string",
-        None,
-    )
-    octstr16 = (
-        DataTypeId.octstr16,
-        t.LongOctetString,
-        DataClass.Discrete,
-        "Long octet string",
-        None,
-    )
-    string16 = (
-        DataTypeId.string16,
-        t.LongCharacterString,
-        DataClass.Discrete,
-        "Long character string",
-        None,
-    )
-    array = (
-        DataTypeId.array,
-        Array,
-        DataClass.Discrete,
-        "Array",
-        None,
-    )
-    struct = (
-        DataTypeId.struct,
-        ZCLStructure,
-        DataClass.Discrete,
-        "Structure",
-        None,
-    )
-    set = (
-        DataTypeId.set,
-        Set,
-        DataClass.Discrete,
-        "Set",
-        None,
-    )
-    bag = (
-        DataTypeId.bag,
-        Bag,
-        DataClass.Discrete,
-        "Bag",
-        None,
-    )
-    ToD = (
-        DataTypeId.ToD,
-        t.TimeOfDay,
-        DataClass.Analog,
-        "Time of day",
-        t.TimeOfDay(hours=0xFF, minutes=0xFF, seconds=0xFF, hundredths=0xFF),
-    )
-    date = (
-        DataTypeId.date,
-        t.Date,
-        DataClass.Analog,
-        "Date",
-        t.Date(years_since_1900=0xFF, month=0xFF, day=0xFF, day_of_week=0xFF),
-    )
-    UTC = (
-        DataTypeId.UTC,
-        t.UTCTime,
-        DataClass.Analog,
-        "UTCTime",
-        t.UTCTime(0xFFFFFFFF),
-    )
-    clusterId = (  # noqa: N815
-        DataTypeId.clusterId,
-        t.ClusterId,
-        DataClass.Discrete,
-        "Cluster ID",
-        t.ClusterId(0xFFFF),
-    )
-    attribId = (  # noqa: N815
-        DataTypeId.attribId,
-        t.AttributeId,
-        DataClass.Discrete,
-        "Attribute ID",
-        t.AttributeId(0xFFFF),
-    )
-    bacOID = (  # noqa: N815
-        DataTypeId.bacOID,
-        t.BACNetOid,
-        DataClass.Discrete,
-        "BACNet OID",
-        t.BACNetOid(0xFFFFFFFF),
-    )
-    EUI64 = (
-        DataTypeId.EUI64,
-        t.EUI64,
-        DataClass.Discrete,
-        "IEEE address",
-        t.EUI64.convert("FF:FF:FF:FF:FF:FF:FF:FF"),
-    )
-    key128 = (
-        DataTypeId.key128,
-        t.KeyData,
-        DataClass.Discrete,
-        "128-bit security key",
-        t.KeyData.convert("FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF"),
-    )
-
-    @classmethod
-    @functools.cache
-    def _python_type_index(cls: type[Self]) -> dict[type, Self]:  # noqa: N805
-        return {d.python_type: d for d in cls}
-
-    @classmethod
-    def from_python_type(cls: type[Self], python_type: type) -> Self:
-        """Return Zigbee Datatype ID for a give python type."""
-        python_type_index = cls._python_type_index()
-
-        # We return the most specific parent class
-        for parent_cls in python_type.__mro__:
-            if parent_cls in python_type_index:
-                return python_type_index[parent_cls]
-
-        return cls.unk
-
-    @classmethod
-    @functools.cache
-    def _data_type_index(cls: type[Self]) -> dict[type, Self]:  # noqa: N805
-        return {d.type_id: d for d in cls}
-
-    @classmethod
-    def from_type_id(cls: type[Self], type_id: DataTypeId) -> Self:
-        return cls._data_type_index()[type_id]
-
-
-@dataclasses.dataclass()
-class ReadAttributeRecord:
+class ReadAttributeRecord(t.Struct):
     """Read Attribute Record."""
 
-    attrid: t.uint16_t
+    attrid: t.uint16_t = t.StructField(repr=_hex_uint16_repr)
     status: Status
-    value: TypeValue | Array | Bag | Set | None
-
-    def __init__(
-        self,
-        attrid: t.uint16_t | Self = t.uint16_t(0x0000),
-        status: Status = Status.SUCCESS,
-        value: TypeValue | Array | Bag | Set | None = None,
-    ) -> None:
-        if isinstance(attrid, self.__class__):
-            # "Copy constructor"
-            self.attrid = attrid.attrid
-            self.status = attrid.status
-            self.value = attrid.value
-            return
-
-        self.attrid = t.uint16_t(attrid)
-        self.status = Status(status)
-        self.value = value
-
-    @classmethod
-    def deserialize(cls, data: bytes) -> tuple[Self, bytes]:
-        attrid, data = t.uint16_t.deserialize(data)
-        status, data = Status.deserialize(data)
-        value = None
-
-        if status == Status.SUCCESS:
-            type_id, data = DataTypeId.deserialize(data)
-
-            # Arrays, Sets, and Bags are treated differently
-            if type_id in (DataTypeId.array, DataTypeId.set, DataTypeId.bag):
-                value, data = DataType.from_type_id(type_id).python_type.deserialize(
-                    data
-                )
-            else:
-                value, data = TypeValue.deserialize(type_id.serialize() + data)
-
-        return cls(attrid=attrid, status=status, value=value), data
-
-    def serialize(self) -> bytes:
-        data = self.attrid.serialize()
-        data += self.status.serialize()
-
-        if self.status == Status.SUCCESS:
-            assert self.value is not None
-
-            if isinstance(self.value, (Array, Set, Bag)):
-                data += (
-                    DataType.from_python_type(type(self.value)).type_id.serialize()
-                    + self.value.serialize()
-                )
-            else:
-                data += self.value.serialize()
-
-        return data
+    value: TypeValue = t.StructField(requires=lambda s: s.status == Status.SUCCESS)
 
 
 class Attribute(t.Struct):
@@ -760,7 +305,7 @@ class AttributeReportingConfig:
             if self.direction == ReportingDirection.ReceiveReports:
                 self.timeout: int = other.timeout
                 return
-            self.datatype: DataTypeId = other.datatype
+            self.datatype: int = other.datatype
             self.min_interval: int = other.min_interval
             self.max_interval: int = other.max_interval
             self.reportable_change: int = other.reportable_change
@@ -778,17 +323,10 @@ class AttributeReportingConfig:
             r += t.uint8_t(self.datatype).serialize()
             r += t.uint16_t(self.min_interval).serialize()
             r += t.uint16_t(self.max_interval).serialize()
-
-            try:
-                data_type = DataType.from_type_id(self.datatype)
-            except KeyError:
-                _LOGGER.warning(
-                    "Unknown ZCL type %d, not setting reportable change", self.datatype
-                )
-            else:
-                if data_type.type_class is Analog:
-                    r += data_type.python_type(self.reportable_change).serialize()
-
+            datatype = DATA_TYPES.get(self.datatype, None)
+            if datatype and datatype[2] is Analog:
+                datatype = datatype[1]
+                r += datatype(self.reportable_change).serialize()
         return r
 
     @classmethod
@@ -809,20 +347,11 @@ class AttributeReportingConfig:
         else:
             # Notifying that I will report things to you
             self.datatype, data = t.uint8_t.deserialize(data)
+            datatype = DATA_TYPES[self.datatype]
             self.min_interval, data = t.uint16_t.deserialize(data)
             self.max_interval, data = t.uint16_t.deserialize(data)
-
-            try:
-                data_type = DataType.from_type_id(self.datatype)
-            except KeyError:
-                _LOGGER.warning(
-                    "Unknown ZCL type %d, cannot read reportable change", self.datatype
-                )
-            else:
-                if data_type.type_class is Analog:
-                    self.reportable_change, data = data_type.python_type.deserialize(
-                        data
-                    )
+            if datatype[2] is Analog:
+                self.reportable_change, data = datatype[1].deserialize(data)
 
         return self, data
 
@@ -969,19 +498,8 @@ class Direction(t.enum1):
     def _from_is_reply(cls, is_reply: bool) -> Direction:
         return cls.Server_to_Client if is_reply else cls.Client_to_Server
 
-    def flip(self) -> Self:
-        return (
-            self.Server_to_Client
-            if self == self.Client_to_Server
-            else self.Client_to_Server
-        )
-
-
-class FrameControl(t.IntStruct, t.uint8_t):
-    """The frame control field contains information defining the command type
-    and other control flags.
-    """
-
+# Zigpy ZCL Library-foundation.py
+class FrameControl(t.Struct, t.uint8_t):
     frame_type: FrameType
     is_manufacturer_specific: t.uint1_t
     direction: Direction
@@ -1028,6 +546,13 @@ class FrameControl(t.IntStruct, t.uint8_t):
 
 
 class ZCLHeader(t.Struct):
+    frame_control: FrameControl
+    manufacturer: t.uint16_t = t.StructField(
+        requires=lambda hdr:
+        hdr.frame_control.is_manufacturer_specific)
+    tsn: t.uint8_t
+    command_id: t.uint8_t
+
     NO_MANUFACTURER_ID = -1  # type: typing.Literal
 
     frame_control: FrameControl
@@ -1038,18 +563,18 @@ class ZCLHeader(t.Struct):
     command_id: t.uint8_t
 
     def __new__(
-        cls: type[Self],
+        cls: type[ZCLHeader],
         frame_control: FrameControl | None = None,
         manufacturer: t.uint16_t | None = None,
         tsn: int | t.uint8_t | None = None,
         command_id: int | GeneralCommand | None = None,
-    ) -> Self:
+    ) -> ZCLHeader:
         # Allow "auto manufacturer ID" to be disabled in higher layers
         if manufacturer is cls.NO_MANUFACTURER_ID:
             manufacturer = None
 
         if frame_control is not None and manufacturer is not None:
-            frame_control = frame_control.replace(is_manufacturer_specific=True)
+            frame_control.is_manufacturer_specific = True
 
         return super().__new__(cls, frame_control, manufacturer, tsn, command_id)
 
@@ -1069,9 +594,7 @@ class ZCLHeader(t.Struct):
         super().__setattr__(name, value)
 
         if name == "manufacturer" and self.frame_control is not None:
-            self.frame_control = self.frame_control.replace(
-                is_manufacturer_specific=value is not None
-            )
+            self.frame_control.is_manufacturer_specific = value is not None
 
     @classmethod
     def general(
@@ -1092,13 +615,7 @@ class ZCLHeader(t.Struct):
         )
 
     @classmethod
-    def cluster(
-        cls,
-        tsn: int | t.uint8_t,
-        command_id: int | t.uint8_t,
-        manufacturer: int | t.uint16_t | None = None,
-        direction: Direction = Direction.Client_to_Server,
-    ) -> ZCLHeader:
+    def cluster(cls,tsn,command_id,manufacturer,direction)-> ZCLHeader:
         return cls(
             frame_control=FrameControl.cluster(
                 direction=direction,
@@ -1116,6 +633,7 @@ class ZCLCommandDef(t.BaseDataclassMixin):
     schema: CommandSchema = None
     direction: Direction = None
     is_manufacturer_specific: bool = None
+    # schema_item: dict = None
 
     # set later
     name: str = None
@@ -1139,7 +657,7 @@ class ZCLCommandDef(t.BaseDataclassMixin):
         """
 
         if isinstance(self.schema, tuple):
-            raise ValueError(  # noqa: TRY004
+            raise ValueError(
                 f"Tuple schemas are deprecated: {self.schema!r}. Use a dictionary or a"
                 f" Struct subclass."
             )
@@ -1153,12 +671,15 @@ class ZCLCommandDef(t.BaseDataclassMixin):
 
         cls_attrs = {
             "__annotations__": {},
+            "__detail__": {},
+            "__save__": {},
             "command": self,
         }
 
+        # "attribute_ids": t.List[t.uint16_t]
+
         for name, param_type in self.schema.items():
             plain_name = name.rstrip("?")
-
             # Make sure parameters with names like "foo bar" and "class" can't exist
             if not plain_name.isidentifier() or keyword.iskeyword(plain_name):
                 raise ValueError(
@@ -1171,6 +692,10 @@ class ZCLCommandDef(t.BaseDataclassMixin):
                 optional=name.endswith("?"),
             )
 
+            cls_attrs["__detail__"][plain_name] = param_type
+            cls_attrs["__save__"][plain_name] = str(param_type)
+
+        # 定义了一个名为self.name的新类，该类是CommandSchema的子类，并且具有cls_attrs赋予的属性和值
         schema = type(self.name, (CommandSchema,), cls_attrs)
 
         return self.replace(schema=schema)
@@ -1187,7 +712,7 @@ class ZCLCommandDef(t.BaseDataclassMixin):
         )
 
 
-class CommandSchema(t.Struct, tuple):  # noqa: SLOT001
+class CommandSchema(t.Struct, tuple):
     """Struct subclass that behaves more like a tuple."""
 
     command: ZCLCommandDef = None
@@ -1251,9 +776,12 @@ ZCLAttributeAccess._names = {
 class ZCLAttributeDef(t.BaseDataclassMixin):
     id: t.uint16_t = None
     type: type = None
-    zcl_type: DataTypeId = None
-    access: ZCLAttributeAccess = (
-        ZCLAttributeAccess.Read | ZCLAttributeAccess.Write | ZCLAttributeAccess.Report
+    access: ZCLAttributeAccess = dataclasses.field(
+        default=(
+            ZCLAttributeAccess.Read
+            | ZCLAttributeAccess.Write
+            | ZCLAttributeAccess.Report
+        ),
     )
     mandatory: bool = False
     is_manufacturer_specific: bool = False
@@ -1273,11 +801,6 @@ class ZCLAttributeDef(t.BaseDataclassMixin):
         if isinstance(self.access, str):
             object.__setattr__(self, "access", ZCLAttributeAccess.from_str(self.access))
 
-        if self.zcl_type is None:
-            object.__setattr__(
-                self, "zcl_type", DataType.from_python_type(self.type).type_id
-            )
-
         ensure_valid_name(self.name)
 
     def __repr__(self) -> str:
@@ -1286,7 +809,6 @@ class ZCLAttributeDef(t.BaseDataclassMixin):
             f"id=0x{self.id:04X}, "
             f"name={self.name!r}, "
             f"type={self.type}, "
-            f"zcl_type={self.zcl_type}, "
             f"access={self.access!r}, "
             f"mandatory={self.mandatory!r}, "
             f"is_manufacturer_specific={self.is_manufacturer_specific}"
@@ -1295,7 +817,7 @@ class ZCLAttributeDef(t.BaseDataclassMixin):
 
 
 class IterableMemberMeta(type):
-    def __iter__(cls) -> typing.Iterator[typing.Any]:
+    def __iter__(cls) -> typing.Iterable[typing.Any]:
         for name in dir(cls):
             if not name.startswith("_"):
                 yield getattr(cls, name)
@@ -1425,6 +947,8 @@ GENERAL_COMMANDS = COMMANDS = {
         direction=Direction.Server_to_Client,
     ),
 }
+
+# GENERAL_COMMANDS2 = GENERAL_COMMANDS
 
 for command_id, command_def in list(GENERAL_COMMANDS.items()):
     GENERAL_COMMANDS[command_id] = command_def.replace(
